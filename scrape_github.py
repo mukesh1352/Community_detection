@@ -5,10 +5,8 @@ import pandas as pd
 from itertools import combinations
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import random
 
 import igraph as ig
-import leidenalg
 import networkx as nx
 
 from dotenv import load_dotenv
@@ -19,11 +17,16 @@ import matplotlib.patches as mpatches
 import matplotlib.colors as mcolors
 import numpy as np
 
+import plotly.express as px
+from pyvis.network import Network
+
+# ------------------ GitHub Token ------------------
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 if not GITHUB_TOKEN:
     raise ValueError("Set GITHUB_TOKEN in your .env file!")
 HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"}
 
+# ------------------ GitHub API Functions ------------------
 def github_get(url, params=None):
     while True:
         r = requests.get(url, headers=HEADERS, params=params)
@@ -94,6 +97,7 @@ def scrape_github(query="created:>2020-01-01 stars:>100", per_page=100, max_page
     print(f"Scraping complete! Saved {filename}")
     return pd.DataFrame(dataset)
 
+# ------------------ Build User Graph ------------------
 def build_user_graph(df, min_edge_weight=2):
     edges_dict = defaultdict(int)
     user_languages = defaultdict(lambda: defaultdict(int))  # user -> language -> bytes
@@ -105,7 +109,6 @@ def build_user_graph(df, min_edge_weight=2):
         for u1, u2 in combinations(contributors,2):
             key = tuple(sorted([u1,u2]))
             edges_dict[key] += 1
-        # Collect user-language bytes for clustering users
         for u in contributors:
             for lang, b in languages.items():
                 user_languages[u][lang] += b
@@ -119,7 +122,6 @@ def build_user_graph(df, min_edge_weight=2):
     G = ig.Graph(edges=edges_idx, directed=False)
     G.vs["name"] = list(all_users)
     G.es["weight"] = weights
-    # For each user, select top language
     top_languages = []
     for u in G.vs["name"]:
         langs = user_languages[u]
@@ -129,72 +131,128 @@ def build_user_graph(df, min_edge_weight=2):
     print(f"Graph created: {G.vcount()} nodes, {G.ecount()} edges")
     return G
 
+# ------------------ Save GEXF for Gephi ------------------
 def save_gexf(G, filename="user_user_graph_leiden.gexf"):
     print("Converting igraph to NetworkX for Gephi export...")
+    language_counts = defaultdict(int)
+    for v in G.vs:
+        language_counts[v["top_language"]] += 1
+    top_global_language = max(language_counts.items(), key=lambda x: x[1])[0]
     Gnx = nx.Graph()
     for v in G.vs:
-        Gnx.add_node(v["name"], top_language=v["top_language"])
+        Gnx.add_node(
+            v["name"],
+            top_language=v["top_language"],
+            is_top_global_language=v["top_language"]==top_global_language
+        )
     for e in G.es:
         u, v_ = e.tuple
         Gnx.add_edge(G.vs[u]["name"], G.vs[v_]["name"], weight=e["weight"])
     nx.write_gexf(Gnx, filename)
     print(f"Saved GEXF file: {filename}")
+    print(f"Global top language: {top_global_language}")
 
+# ------------------ Plot Language Clusters ------------------
 def plot_language_clusters(G, filename="language_clusters.png"):
-    print("Plotting distinct language clusters in circles...")
     languages = sorted(set(G.vs["top_language"]))
     lang_to_nodes = {lang: [i for i,v in enumerate(G.vs["top_language"]) if v == lang] for lang in languages}
     cols = min(6, len(languages))
     rows = (len(languages) + cols - 1) // cols
     fig, ax = plt.subplots(figsize=(cols*5, rows*5))
-    # Assign a distinct color per language
     palette = plt.colormaps['tab20']
     lang_colors = {lang: mcolors.to_hex(palette(i % 20)) for i,lang in enumerate(languages)}
     radius = 1.6
-    # Place circles on a grid
     positions = dict()
     cluster_bounds = dict()
+    language_counts = defaultdict(int)
+    for v in G.vs:
+        language_counts[v["top_language"]] += 1
+    top_global_language = max(language_counts.items(), key=lambda x: x[1])[0]
+
     for idx, lang in enumerate(languages):
         center_x = radius*2.5 *(idx%cols)
         center_y = -radius*2.5* (idx//cols)
         nodes = lang_to_nodes[lang]
         n = len(nodes)
-        # arrange nodes in a circle for this cluster
         theta = np.linspace(0, 2*np.pi, n, endpoint=False)
-        node_pos = []
         for i, node in enumerate(nodes):
             x = center_x + radius*np.cos(theta[i])
             y = center_y + radius*np.sin(theta[i])
             positions[node] = (x, y)
-            node_pos.append((x,y))
-        # Circle boundary
         cluster_bounds[lang] = (center_x, center_y, radius+0.4)
-    # Draw edges
     for e in G.es:
         src, dst = e.tuple
         x1, y1 = positions.get(src, (0,0))
         x2, y2 = positions.get(dst, (0,0))
         plt.plot([x1, x2], [y1, y2], color="#bbbbbb", zorder=1, linewidth=0.5, alpha=0.5)
-    # Draw nodes
     for node, (x,y) in positions.items():
         lang = G.vs[node]["top_language"]
-        plt.scatter(x, y, s=40, color=lang_colors.get(lang,"gray"), edgecolors="k", linewidths=0.2, zorder=2)
-    # Draw language circles
+        edgecolor = "red" if lang==top_global_language else "k"
+        plt.scatter(x, y, s=50, color=lang_colors.get(lang,"gray"), edgecolors=edgecolor, linewidths=1.2, zorder=2)
     for lang, (center_x, center_y, rad) in cluster_bounds.items():
         circle = plt.Circle((center_x, center_y), rad, edgecolor=lang_colors[lang], facecolor='none', lw=3, zorder=3)
         ax.add_patch(circle)
         plt.text(center_x, center_y+rad+0.2, lang, fontsize=14, ha='center', weight='bold', color=lang_colors[lang])
     plt.axis('equal')
     plt.axis('off')
-    # Create legend
     patch_list = [mpatches.Patch(color=lang_colors[lang], label=lang) for lang in languages]
     plt.legend(handles=patch_list, title="Language Cluster", loc="upper left", fontsize='large')
     fig.tight_layout()
     plt.savefig(filename, dpi=320)
-    print(f"Saved distinct language cluster PNG as {filename}")
+    print(f"Saved language cluster PNG as {filename}")
 
+# ------------------ Interactive HTML Dashboard ------------------
+def generate_html_dashboard(G, df, filename="github_dashboard.html"):
+    # 1. Bar chart of top languages
+    language_counts = defaultdict(int)
+    for v in G.vs:
+        language_counts[v["top_language"]] += 1
+    lang_df = pd.DataFrame(language_counts.items(), columns=["Language", "Users"]).sort_values("Users", ascending=False)
+    bar_fig = px.bar(lang_df, x="Language", y="Users", title="Number of Users per Top Language")
+
+    # 2. Pie chart of contributions per language
+    contrib_counts = defaultdict(int)
+    for idx, row in df.iterrows():
+        for lang, val in row.get("languages", {}).items():
+            contrib_counts[lang] += val
+    contrib_df = pd.DataFrame(contrib_counts.items(), columns=["Language", "Bytes"]).sort_values("Bytes", ascending=False)
+    pie_fig = px.pie(contrib_df, names="Language", values="Bytes", title="Contributions per Language")
+
+    # 3. Interactive network using pyvis
+    net = Network(height="700px", width="100%", notebook=False)
+    for v in G.vs:
+        color = f"#{np.random.randint(0,0xFFFFFF):06x}"
+        size = 10 + G.degree(v.index)
+        border = "red" if v["top_language"]==lang_df.iloc[0]["Language"] else "black"
+        net.add_node(v["name"], label=v["name"], color=color, title=v["top_language"], size=size, borderWidth=2)
+    for e in G.es:
+        u, v_ = e.tuple
+        net.add_edge(G.vs[u]["name"], G.vs[v_]["name"], value=e["weight"])
+    net.show_buttons(filter_=['physics'])
+    net.save_graph("network_temp.html")
+
+    # Merge plotly charts and pyvis into one HTML
+    with open("network_temp.html", "r") as f:
+        network_html = f.read()
+    html_content = f"""
+    <html><head><title>GitHub Dashboard</title></head><body>
+    <h1>GitHub User-Language Dashboard</h1>
+    <h2>Interactive Network</h2>
+    {network_html}
+    <h2>Bar Chart of Top Languages</h2>
+    {bar_fig.to_html(full_html=False, include_plotlyjs='cdn')}
+    <h2>Pie Chart of Contributions</h2>
+    {pie_fig.to_html(full_html=False, include_plotlyjs='cdn')}
+    </body></html>
+    """
+    with open(filename, "w") as f:
+        f.write(html_content)
+    print(f"Saved interactive dashboard as {filename}")
+
+# ------------------ Main Execution ------------------
 if __name__=="__main__":
     df = scrape_github(max_pages=2, max_workers=10, limit=150)
     G = build_user_graph(df)
     save_gexf(G, filename="user_user_graph_leiden.gexf")
     plot_language_clusters(G, filename="language_clusters.png")
+    generate_html_dashboard(G, df, filename="github_dashboard.html")
