@@ -100,7 +100,7 @@ def scrape_github(query="created:>2020-01-01 stars:>100", per_page=100, max_page
 # ------------------ Build User Graph ------------------
 def build_user_graph(df, min_edge_weight=2):
     edges_dict = defaultdict(int)
-    user_languages = defaultdict(lambda: defaultdict(int))  # user -> language -> bytes
+    user_languages = defaultdict(lambda: defaultdict(int))
     print("Building user-user graph...")
     for idx, row in df.iterrows():
         contributors = row.get("contributors", [])
@@ -152,26 +152,30 @@ def save_gexf(G, filename="user_user_graph_leiden.gexf"):
     print(f"Saved GEXF file: {filename}")
     print(f"Global top language: {top_global_language}")
 
-# ------------------ Plot Language Clusters ------------------
+# ------------------ Plot Language Clusters with Bar Chart ------------------
 def plot_language_clusters(G, filename="language_clusters.png"):
     languages = sorted(set(G.vs["top_language"]))
     lang_to_nodes = {lang: [i for i,v in enumerate(G.vs["top_language"]) if v == lang] for lang in languages}
-    cols = min(6, len(languages))
-    rows = (len(languages) + cols - 1) // cols
-    fig, ax = plt.subplots(figsize=(cols*5, rows*5))
-    palette = plt.colormaps['tab20']
-    lang_colors = {lang: mcolors.to_hex(palette(i % 20)) for i,lang in enumerate(languages)}
-    radius = 1.6
-    positions = dict()
-    cluster_bounds = dict()
     language_counts = defaultdict(int)
     for v in G.vs:
         language_counts[v["top_language"]] += 1
     top_global_language = max(language_counts.items(), key=lambda x: x[1])[0]
 
+    # Create figure with 2 subplots: cluster network + bar chart
+    fig = plt.figure(figsize=(18, 10))
+    ax1 = fig.add_subplot(1, 2, 1)
+    ax2 = fig.add_subplot(1, 2, 2)
+
+    # ---------- Language Cluster Network ----------
+    palette = plt.colormaps['tab20']
+    lang_colors = {lang: mcolors.to_hex(palette(i % 20)) for i, lang in enumerate(languages)}
+    radius = 1.6
+    positions = dict()
+    cluster_bounds = dict()
+
     for idx, lang in enumerate(languages):
-        center_x = radius*2.5 *(idx%cols)
-        center_y = -radius*2.5* (idx//cols)
+        center_x = radius*2.5 *(idx%6)
+        center_y = -radius*2.5* (idx//6)
         nodes = lang_to_nodes[lang]
         n = len(nodes)
         theta = np.linspace(0, 2*np.pi, n, endpoint=False)
@@ -180,50 +184,74 @@ def plot_language_clusters(G, filename="language_clusters.png"):
             y = center_y + radius*np.sin(theta[i])
             positions[node] = (x, y)
         cluster_bounds[lang] = (center_x, center_y, radius+0.4)
+
     for e in G.es:
         src, dst = e.tuple
         x1, y1 = positions.get(src, (0,0))
         x2, y2 = positions.get(dst, (0,0))
-        plt.plot([x1, x2], [y1, y2], color="#bbbbbb", zorder=1, linewidth=0.5, alpha=0.5)
+        ax1.plot([x1, x2], [y1, y2], color="#bbbbbb", zorder=1, linewidth=0.5, alpha=0.5)
+
     for node, (x,y) in positions.items():
         lang = G.vs[node]["top_language"]
         edgecolor = "red" if lang==top_global_language else "k"
-        plt.scatter(x, y, s=50, color=lang_colors.get(lang,"gray"), edgecolors=edgecolor, linewidths=1.2, zorder=2)
+        ax1.scatter(x, y, s=50, color=lang_colors.get(lang,"gray"), edgecolors=edgecolor, linewidths=1.2, zorder=2)
+
     for lang, (center_x, center_y, rad) in cluster_bounds.items():
-        circle = plt.Circle((center_x, center_y), rad, edgecolor=lang_colors[lang], facecolor='none', lw=3, zorder=3)
-        ax.add_patch(circle)
-        plt.text(center_x, center_y+rad+0.2, lang, fontsize=14, ha='center', weight='bold', color=lang_colors[lang])
-    plt.axis('equal')
-    plt.axis('off')
-    patch_list = [mpatches.Patch(color=lang_colors[lang], label=lang) for lang in languages]
-    plt.legend(handles=patch_list, title="Language Cluster", loc="upper left", fontsize='large')
+        circle = plt.Circle((center_x, center_y), rad, edgecolor=lang_colors[lang], facecolor='none', lw=2, zorder=3)
+        ax1.add_patch(circle)
+        ax1.text(center_x, center_y+rad+0.2, lang, fontsize=10, ha='center', weight='bold', color=lang_colors[lang])
+
+    ax1.axis('equal')
+    ax1.axis('off')
+    ax1.set_title("Language Clusters Network", fontsize=14)
+
+    # ---------- Bar Chart ----------
+    sorted_lang = sorted(language_counts.items(), key=lambda x: x[1], reverse=True)
+    bar_langs, bar_counts = zip(*sorted_lang)
+    colors = ['red' if lang==top_global_language else 'blue' for lang in bar_langs]
+    ax2.barh(bar_langs, bar_counts, color=colors)
+    ax2.invert_yaxis()
+    ax2.set_xlabel("Number of Users")
+    ax2.set_title(f"Most Used Languages (Top: {top_global_language})", fontsize=14)
+
     fig.tight_layout()
     plt.savefig(filename, dpi=320)
-    print(f"Saved language cluster PNG as {filename}")
+    plt.close()
+    print(f"Saved combined PNG file: {filename}")
 
 # ------------------ Interactive HTML Dashboard ------------------
 def generate_html_dashboard(G, df, filename="github_dashboard.html"):
-    # 1. Bar chart of top languages
     language_counts = defaultdict(int)
     for v in G.vs:
         language_counts[v["top_language"]] += 1
-    lang_df = pd.DataFrame(language_counts.items(), columns=["Language", "Users"]).sort_values("Users", ascending=False)
-    bar_fig = px.bar(lang_df, x="Language", y="Users", title="Number of Users per Top Language")
+    top_global_language = max(language_counts.items(), key=lambda x: x[1])[0]
 
-    # 2. Pie chart of contributions per language
+    lang_df = pd.DataFrame(language_counts.items(), columns=["Language", "Users"]).sort_values("Users", ascending=False)
+    bar_fig = px.bar(
+        lang_df,
+        x="Language",
+        y="Users",
+        title=f"Number of Users per Top Language (Top: {top_global_language})",
+        color=lang_df["Language"]==top_global_language,
+        color_discrete_map={True: 'red', False: 'blue'}
+    )
+
     contrib_counts = defaultdict(int)
     for idx, row in df.iterrows():
         for lang, val in row.get("languages", {}).items():
             contrib_counts[lang] += val
     contrib_df = pd.DataFrame(contrib_counts.items(), columns=["Language", "Bytes"]).sort_values("Bytes", ascending=False)
-    pie_fig = px.pie(contrib_df, names="Language", values="Bytes", title="Contributions per Language")
+    pie_fig = px.pie(
+        contrib_df,
+        names="Language",
+        values="Bytes",
+        title=f"Contributions per Language (Most Used: {top_global_language})"
+    )
 
-    # 3. Interactive network using pyvis
     net = Network(height="700px", width="100%", notebook=False)
     for v in G.vs:
-        color = f"#{np.random.randint(0,0xFFFFFF):06x}"
+        color = "red" if v["top_language"]==top_global_language else f"#{np.random.randint(0,0xFFFFFF):06x}"
         size = 10 + G.degree(v.index)
-        border = "red" if v["top_language"]==lang_df.iloc[0]["Language"] else "black"
         net.add_node(v["name"], label=v["name"], color=color, title=v["top_language"], size=size, borderWidth=2)
     for e in G.es:
         u, v_ = e.tuple
@@ -231,7 +259,6 @@ def generate_html_dashboard(G, df, filename="github_dashboard.html"):
     net.show_buttons(filter_=['physics'])
     net.save_graph("network_temp.html")
 
-    # Merge plotly charts and pyvis into one HTML
     with open("network_temp.html", "r") as f:
         network_html = f.read()
     html_content = f"""
@@ -241,7 +268,7 @@ def generate_html_dashboard(G, df, filename="github_dashboard.html"):
     {network_html}
     <h2>Bar Chart of Top Languages</h2>
     {bar_fig.to_html(full_html=False, include_plotlyjs='cdn')}
-    <h2>Pie Chart of Contributions</h2>
+    <h2>Pie Chart of Contributions per Language</h2>
     {pie_fig.to_html(full_html=False, include_plotlyjs='cdn')}
     </body></html>
     """
