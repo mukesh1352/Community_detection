@@ -276,10 +276,46 @@ def generate_html_dashboard(G, df, filename="github_dashboard.html"):
         f.write(html_content)
     print(f"Saved interactive dashboard as {filename}")
 
+def plot_language_pie_chart(G, filename="language_pie_chart.png"):
+    """
+    Generates a static pie chart showing the distribution of users by their top programming language.
+    """
+    from collections import defaultdict
+
+    language_counts = defaultdict(int)
+    for v in G.vs:
+        language_counts[v["top_language"]] += 1
+
+    langs, counts = zip(*sorted(language_counts.items(), key=lambda x: x[1], reverse=True))
+    top_global_language = langs[0]
+
+    colors = [
+        "red" if lang == top_global_language else plt.cm.tab20(i % 20)
+        for i, lang in enumerate(langs)
+    ]
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    wedges, texts, autotexts = ax.pie(
+        counts,
+        labels=langs,
+        autopct="%1.1f%%",
+        startangle=140,
+        colors=colors,
+        textprops={"fontsize": 9},
+        wedgeprops={"linewidth": 1, "edgecolor": "white"}
+    )
+
+    ax.set_title(f"User Distribution by Top Language (Top: {top_global_language})", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(filename, dpi=320)
+    plt.close()
+    print(f"Saved pie chart: {filename}")
+
+
 # ------------------ Main Execution ------------------
 if __name__=="__main__":
     df = scrape_github(max_pages=2, max_workers=10, limit=150)
     G = build_user_graph(df)
     save_gexf(G, filename="user_user_graph_leiden.gexf")
     plot_language_clusters(G, filename="language_clusters.png")
-    generate_html_dashboard(G, df, filename="github_dashboard.html")
+    plot_language_pie_chart(G, filename="language_pie_chart.png")
